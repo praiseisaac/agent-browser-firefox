@@ -13,6 +13,15 @@ pub async fn handle(session: &BidiSession, req: &Request) -> Response {
         "click" => click(session, req).await,
         "fill" => fill(session, req).await,
         "type" => type_text(session, req).await,
+        "press" => press(session, req).await,
+        "keydown" => key_hold(session, req, true).await,
+        "keyup" => key_hold(session, req, false).await,
+        "keyboard" => keyboard(session, req).await,
+        "hover" => hover(session, req).await,
+        "dblclick" => dblclick(session, req).await,
+        "drag" => drag(session, req).await,
+        "scroll" => scroll(session, req).await,
+        "wait" => wait(session, req).await,
         "get" => get(session, req).await,
         "eval" => eval(session, req).await,
         "screenshot" => screenshot(session, req).await,
@@ -212,6 +221,174 @@ async fn text_result(session: &BidiSession, expr: &str) -> Response {
         }
         Err(e) => Response::err(e),
     }
+}
+
+// ---- real input ------------------------------------------------------------
+
+async fn press(session: &BidiSession, req: &Request) -> Response {
+    let Some(key) = req.args.first() else {
+        return Response::err("usage: press <key>  (e.g. Enter, Tab, Control+a)");
+    };
+    match session.press(key).await {
+        Ok(()) => Response::ok_text(format!("pressed {key}")),
+        Err(e) => Response::err(e),
+    }
+}
+
+async fn key_hold(session: &BidiSession, req: &Request, down: bool) -> Response {
+    let Some(key) = req.args.first() else {
+        return Response::err("usage: keydown/keyup <key>");
+    };
+    match session.key_hold(key, down).await {
+        Ok(()) => Response::ok_text(format!("{} {key}", if down { "keydown" } else { "keyup" })),
+        Err(e) => Response::err(e),
+    }
+}
+
+async fn keyboard(session: &BidiSession, req: &Request) -> Response {
+    let sub = req.args.first().map(String::as_str).unwrap_or("");
+    let text = req.args.get(1..).map(|s| s.join(" ")).unwrap_or_default();
+    match sub {
+        "type" => match session.type_keys(&text).await {
+            Ok(()) => Response::ok_text("typed"),
+            Err(e) => Response::err(e),
+        },
+        "inserttext" => match session.insert_text(&text).await {
+            Ok(()) => Response::ok_text("inserted"),
+            Err(e) => Response::err(e),
+        },
+        _ => Response::err("usage: keyboard <type|inserttext> <text>"),
+    }
+}
+
+async fn hover(session: &BidiSession, req: &Request) -> Response {
+    let Some(sel) = req.args.first() else {
+        return Response::err("usage: hover <selector|@ref>");
+    };
+    match session.hover(&resolve_selector(sel)).await {
+        Ok(()) => Response::ok_text(format!("hovered {sel}")),
+        Err(e) => Response::err(e),
+    }
+}
+
+async fn dblclick(session: &BidiSession, req: &Request) -> Response {
+    let Some(sel) = req.args.first() else {
+        return Response::err("usage: dblclick <selector|@ref>");
+    };
+    match session.dblclick(&resolve_selector(sel)).await {
+        Ok(()) => Response::ok_text(format!("double-clicked {sel}")),
+        Err(e) => Response::err(e),
+    }
+}
+
+async fn drag(session: &BidiSession, req: &Request) -> Response {
+    let (Some(src), Some(tgt)) = (req.args.first(), req.args.get(1)) else {
+        return Response::err("usage: drag <source> <target>");
+    };
+    match session.drag(&resolve_selector(src), &resolve_selector(tgt)).await {
+        Ok(()) => Response::ok_text(format!("dragged {src} → {tgt}")),
+        Err(e) => Response::err(e),
+    }
+}
+
+async fn scroll(session: &BidiSession, req: &Request) -> Response {
+    let dir = req.args.first().map(String::as_str).unwrap_or("down");
+    let amount = req
+        .args
+        .get(1)
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(400);
+    let selector = req.flag("selector").map(resolve_selector);
+    match session.scroll(dir, amount, selector.as_deref()).await {
+        Ok(()) => Response::ok_text(format!("scrolled {dir} {amount}")),
+        Err(e) => Response::err(e),
+    }
+}
+
+// ---- waiting ---------------------------------------------------------------
+
+async fn wait(session: &BidiSession, req: &Request) -> Response {
+    let timeout = std::time::Duration::from_millis(
+        req.flag("timeout").and_then(|s| s.parse().ok()).unwrap_or(30_000),
+    );
+
+    // wait <ms>
+    if let Some(arg) = req.args.first() {
+        if let Ok(ms) = arg.parse::<u64>() {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            return Response::ok_text(format!("waited {ms}ms"));
+        }
+    }
+
+    // wait --url <glob>
+    if let Some(pat) = req.flag("url") {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let url = session.get_url().await.unwrap_or_default();
+            if wildcard_match(pat, &url) {
+                return Response::ok_text(format!("url matched: {url}"));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Response::err(format!("timed out waiting for url ~ {pat}"));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+    }
+
+    // condition-based waits (poll a JS boolean)
+    let (expr, label) = if let Some(text) = req.flag("text") {
+        (
+            format!(
+                "!!(document.body && document.body.innerText.includes({}))",
+                js_str(text)
+            ),
+            format!("text \"{text}\""),
+        )
+    } else if let Some(f) = req.flag("fn") {
+        (format!("!!({f})"), "condition".to_string())
+    } else if let Some(load) = req.flag("load") {
+        let e = match load {
+            "domcontentloaded" => "['interactive','complete'].includes(document.readyState)",
+            _ => "document.readyState === 'complete'",
+        };
+        (e.to_string(), format!("load:{load}"))
+    } else if let Some(sel) = req.args.first() {
+        let css = resolve_selector(sel);
+        let visible = format!(
+            "(() => {{ const el = document.querySelector({s}); if (!el) return false; const r = el.getBoundingClientRect(); const st = getComputedStyle(el); return r.width>0 && r.height>0 && st.visibility!=='hidden' && st.display!=='none'; }})()",
+            s = js_str(&css)
+        );
+        if req.flag("state") == Some("hidden") {
+            (format!("!({visible})"), format!("{sel} hidden"))
+        } else {
+            (visible, format!("{sel} visible"))
+        }
+    } else {
+        return Response::err("usage: wait <ms|selector> | --text|--url|--fn|--load <…>");
+    };
+
+    match session.wait_for_js(&expr, timeout).await {
+        Ok(true) => Response::ok_text(format!("ready: {label}")),
+        Ok(false) => Response::err(format!("timed out waiting for {label}")),
+        Err(e) => Response::err(e),
+    }
+}
+
+/// Minimal glob matcher supporting `*` (any run) and `?` (one char).
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    fn m(p: &[u8], t: &[u8]) -> bool {
+        match p.first() {
+            None => t.is_empty(),
+            Some(b'*') => m(&p[1..], t) || (!t.is_empty() && m(p, &t[1..])),
+            Some(b'?') => !t.is_empty() && m(&p[1..], &t[1..]),
+            Some(&c) => !t.is_empty() && t[0] == c && m(&p[1..], &t[1..]),
+        }
+    }
+    // A bare pattern with no wildcard is treated as a substring match.
+    if !pattern.contains('*') && !pattern.contains('?') {
+        return text.contains(pattern);
+    }
+    m(pattern.as_bytes(), text.as_bytes())
 }
 
 /// `example.com` → `https://example.com`; leaves explicit schemes and

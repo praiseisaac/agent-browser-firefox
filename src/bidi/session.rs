@@ -5,7 +5,7 @@
 use super::client::BidiClient;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Default timeout for a single BiDi command, so a hung page (e.g. an app that
 /// never reaches the load event) can't block the daemon forever.
@@ -199,10 +199,11 @@ impl BidiSession {
             .ok_or_else(|| "screenshot returned no data".to_string())
     }
 
-    /// Click the first element matching a CSS selector (via injected JS for MVP).
+    /// Click the first element matching a CSS selector. Focuses the element
+    /// first so a following `keyboard type` / `press` lands on it.
     pub async fn click(&self, selector: &str) -> Result<(), String> {
         let expr = format!(
-            "(() => {{ const el = document.querySelector({sel}); if (!el) throw new Error('no element matches {sel_disp}'); el.scrollIntoView({{block:'center'}}); el.click(); return true; }})()",
+            "(() => {{ const el = document.querySelector({sel}); if (!el) throw new Error('no element matches {sel_disp}'); el.scrollIntoView({{block:'center'}}); if (el.focus) try {{ el.focus(); }} catch (e) {{}} el.click(); return true; }})()",
             sel = js_string(selector),
             sel_disp = selector.replace('\'', "")
         );
@@ -219,10 +220,215 @@ impl BidiSession {
         self.evaluate(&expr).await.map(|_| ())
     }
 
+    // ---- Real input via input.performActions -------------------------------
+
+    /// Send a list of BiDi input source-actions against the active context.
+    async fn perform_actions(&self, sources: Value) -> Result<(), String> {
+        let ctx = self.active_context().await?;
+        self.send_timeout(
+            "input.performActions",
+            json!({ "context": ctx, "actions": sources }),
+            CMD_TIMEOUT,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Resolve an element's viewport-center coordinates, scrolling it into view.
+    async fn element_center(&self, selector: &str) -> Result<(i64, i64), String> {
+        let expr = format!(
+            "(() => {{ const el = document.querySelector({s}); if (!el) return null; el.scrollIntoView({{block:'center',inline:'center'}}); const r = el.getBoundingClientRect(); return {{ x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) }}; }})()",
+            s = js_string(selector)
+        );
+        let v = self.evaluate(&expr).await?;
+        if v.is_null() {
+            return Err(format!("no element matches {selector}"));
+        }
+        let x = v.get("x").and_then(Value::as_i64).ok_or("element has no position")?;
+        let y = v.get("y").and_then(Value::as_i64).ok_or("element has no position")?;
+        Ok((x, y))
+    }
+
+    /// Press a key chord like `Enter`, `Tab`, or `Control+a` at the current focus.
+    pub async fn press(&self, combo: &str) -> Result<(), String> {
+        let keys = parse_combo(combo)?;
+        let mut actions = Vec::new();
+        for k in &keys {
+            actions.push(json!({ "type": "keyDown", "value": k }));
+        }
+        for k in keys.iter().rev() {
+            actions.push(json!({ "type": "keyUp", "value": k }));
+        }
+        self.perform_actions(json!([{ "type": "key", "id": "kb", "actions": actions }]))
+            .await
+    }
+
+    /// Hold a key down (or release it) without the matching up/down.
+    pub async fn key_hold(&self, key: &str, down: bool) -> Result<(), String> {
+        let v = key_value(key).ok_or_else(|| format!("unknown key '{key}'"))?;
+        let kind = if down { "keyDown" } else { "keyUp" };
+        self.perform_actions(json!([{ "type": "key", "id": "kb", "actions": [{ "type": kind, "value": v }] }]))
+            .await
+    }
+
+    /// Type text as real keystrokes at the current focus.
+    pub async fn type_keys(&self, text: &str) -> Result<(), String> {
+        let mut actions = Vec::new();
+        for ch in text.chars() {
+            let s = ch.to_string();
+            actions.push(json!({ "type": "keyDown", "value": s }));
+            actions.push(json!({ "type": "keyUp", "value": s }));
+        }
+        self.perform_actions(json!([{ "type": "key", "id": "kb", "actions": actions }]))
+            .await
+    }
+
+    /// Insert text into the focused element without synthesizing key events.
+    pub async fn insert_text(&self, text: &str) -> Result<(), String> {
+        let expr = format!(
+            "(() => {{ const el = document.activeElement; if (!el) throw new Error('no focused element'); if ('value' in el) {{ const s=el.selectionStart??el.value.length, e=el.selectionEnd??el.value.length; el.value = el.value.slice(0,s) + {t} + el.value.slice(e); }} else {{ el.textContent += {t}; }} el.dispatchEvent(new Event('input', {{bubbles:true}})); return true; }})()",
+            t = js_string(text)
+        );
+        self.evaluate(&expr).await.map(|_| ())
+    }
+
+    /// Move the mouse over an element.
+    pub async fn hover(&self, selector: &str) -> Result<(), String> {
+        let (x, y) = self.element_center(selector).await?;
+        self.perform_actions(json!([{
+            "type": "pointer", "id": "mouse", "parameters": { "pointerType": "mouse" },
+            "actions": [{ "type": "pointerMove", "x": x, "y": y }]
+        }]))
+        .await
+    }
+
+    /// Double-click an element with real pointer events.
+    pub async fn dblclick(&self, selector: &str) -> Result<(), String> {
+        let (x, y) = self.element_center(selector).await?;
+        self.perform_actions(json!([{
+            "type": "pointer", "id": "mouse", "parameters": { "pointerType": "mouse" },
+            "actions": [
+                { "type": "pointerMove", "x": x, "y": y },
+                { "type": "pointerDown", "button": 0 }, { "type": "pointerUp", "button": 0 },
+                { "type": "pointerDown", "button": 0 }, { "type": "pointerUp", "button": 0 }
+            ]
+        }]))
+        .await
+    }
+
+    /// Drag from one element to another with real pointer events.
+    pub async fn drag(&self, source: &str, target: &str) -> Result<(), String> {
+        let (x1, y1) = self.element_center(source).await?;
+        let (x2, y2) = self.element_center(target).await?;
+        self.perform_actions(json!([{
+            "type": "pointer", "id": "mouse", "parameters": { "pointerType": "mouse" },
+            "actions": [
+                { "type": "pointerMove", "x": x1, "y": y1 },
+                { "type": "pointerDown", "button": 0 },
+                { "type": "pointerMove", "x": x2, "y": y2, "duration": 200 },
+                { "type": "pointerUp", "button": 0 }
+            ]
+        }]))
+        .await
+    }
+
+    /// Scroll the page (or over a specific element) by a wheel delta.
+    pub async fn scroll(&self, dir: &str, amount: i64, selector: Option<&str>) -> Result<(), String> {
+        let (ox, oy) = match selector {
+            Some(sel) => self.element_center(sel).await?,
+            None => (20, 20),
+        };
+        let (dx, dy) = match dir {
+            "up" => (0, -amount),
+            "down" => (0, amount),
+            "left" => (-amount, 0),
+            "right" => (amount, 0),
+            other => return Err(format!("unknown scroll direction '{other}' (up/down/left/right)")),
+        };
+        self.perform_actions(json!([{
+            "type": "wheel", "id": "wheel",
+            "actions": [{ "type": "scroll", "x": ox, "y": oy, "deltaX": dx, "deltaY": dy }]
+        }]))
+        .await
+    }
+
+    // ---- Waiting -----------------------------------------------------------
+
+    /// Poll a boolean JS expression until it is truthy or the timeout elapses.
+    pub async fn wait_for_js(&self, bool_expr: &str, timeout: Duration) -> Result<bool, String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let v = self.evaluate(bool_expr).await.unwrap_or(Value::Bool(false));
+            let truthy = v.as_bool().unwrap_or(false)
+                || v.as_i64().map(|n| n != 0).unwrap_or(false)
+                || v.as_str().map(|s| !s.is_empty()).unwrap_or(false);
+            if truthy {
+                return Ok(true);
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        }
+    }
+
     pub async fn close(&self) -> Result<(), String> {
         let _ = self.client.send("session.end", json!({})).await;
         Ok(())
     }
+}
+
+/// Map a key name to its WebDriver key value (the `\uE0xx` codepoints for
+/// special keys; the character itself otherwise).
+fn key_value(name: &str) -> Option<String> {
+    let k = match name.to_ascii_lowercase().as_str() {
+        "enter" | "return" => '\u{E007}',
+        "tab" => '\u{E004}',
+        "escape" | "esc" => '\u{E00C}',
+        "backspace" => '\u{E003}',
+        "delete" | "del" => '\u{E017}',
+        "space" => ' ',
+        "up" | "arrowup" => '\u{E013}',
+        "down" | "arrowdown" => '\u{E015}',
+        "left" | "arrowleft" => '\u{E012}',
+        "right" | "arrowright" => '\u{E014}',
+        "home" => '\u{E011}',
+        "end" => '\u{E010}',
+        "pageup" => '\u{E00E}',
+        "pagedown" => '\u{E00F}',
+        "insert" => '\u{E016}',
+        "shift" => '\u{E008}',
+        "control" | "ctrl" => '\u{E009}',
+        "alt" | "option" => '\u{E00A}',
+        "meta" | "cmd" | "command" | "super" => '\u{E03D}',
+        "f1" => '\u{E031}', "f2" => '\u{E032}', "f3" => '\u{E033}', "f4" => '\u{E034}',
+        "f5" => '\u{E035}', "f6" => '\u{E036}', "f7" => '\u{E037}', "f8" => '\u{E038}',
+        "f9" => '\u{E039}', "f10" => '\u{E03A}', "f11" => '\u{E03B}', "f12" => '\u{E03C}',
+        other => {
+            let mut chars = other.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => c, // single character
+                _ => return None,
+            }
+        }
+    };
+    Some(k.to_string())
+}
+
+/// Parse a chord like `Control+Shift+a` into ordered key values.
+fn parse_combo(combo: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for part in combo.split('+') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        out.push(key_value(part).ok_or_else(|| format!("unknown key '{part}'"))?);
+    }
+    if out.is_empty() {
+        return Err("no key given".into());
+    }
+    Ok(out)
 }
 
 /// JSON-encode a string for safe embedding in a JS source literal.

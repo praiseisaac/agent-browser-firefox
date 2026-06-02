@@ -67,6 +67,48 @@ enum Command {
     Fill { selector: String, text: String },
     /// Type text into an element (appends).
     Type { selector: String, text: String },
+    /// Press a key chord at the current focus (e.g. Enter, Tab, Control+a).
+    #[command(visible_alias = "key")]
+    Press { key: String },
+    /// Hold a key down.
+    Keydown { key: String },
+    /// Release a held key.
+    Keyup { key: String },
+    /// Real keyboard input at the current focus: keyboard <type|inserttext> <text>.
+    Keyboard {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Hover the mouse over an element.
+    Hover { selector: String },
+    /// Double-click an element.
+    Dblclick { selector: String },
+    /// Drag one element onto another.
+    Drag { source: String, target: String },
+    /// Scroll the page (up/down/left/right) by an optional pixel amount.
+    Scroll {
+        direction: String,
+        amount: Option<i64>,
+        /// Scroll while hovering this element.
+        #[arg(long)]
+        selector: Option<String>,
+    },
+    /// Wait for a condition: wait <ms|selector> [--text|--url|--fn|--load|--state|--timeout].
+    Wait {
+        target: Option<String>,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long = "url")]
+        url: Option<String>,
+        #[arg(long = "fn")]
+        func: Option<String>,
+        #[arg(long = "load")]
+        load: Option<String>,
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        timeout: Option<u64>,
+    },
     /// Read info: get <url|title|text|html|value|attr> [selector] [attr].
     Get {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -141,6 +183,64 @@ async fn main() {
         }
         Command::Type { selector, text } => {
             send_action(&cfg, Request::new("type", vec![selector, text]), json).await
+        }
+        Command::Press { key } => send_action(&cfg, Request::new("press", vec![key]), json).await,
+        Command::Keydown { key } => {
+            send_action(&cfg, Request::new("keydown", vec![key]), json).await
+        }
+        Command::Keyup { key } => send_action(&cfg, Request::new("keyup", vec![key]), json).await,
+        Command::Keyboard { args } => {
+            send_action(&cfg, Request::new("keyboard", args), json).await
+        }
+        Command::Hover { selector } => {
+            send_action(&cfg, Request::new("hover", vec![selector]), json).await
+        }
+        Command::Dblclick { selector } => {
+            send_action(&cfg, Request::new("dblclick", vec![selector]), json).await
+        }
+        Command::Drag { source, target } => {
+            send_action(&cfg, Request::new("drag", vec![source, target]), json).await
+        }
+        Command::Scroll {
+            direction,
+            amount,
+            selector,
+        } => {
+            let mut args = vec![direction];
+            if let Some(a) = amount {
+                args.push(a.to_string());
+            }
+            let mut req = Request::new("scroll", args);
+            if let Some(sel) = selector {
+                req.flags.insert("selector".into(), sel);
+            }
+            send_action(&cfg, req, json).await
+        }
+        Command::Wait {
+            target,
+            text,
+            url,
+            func,
+            load,
+            state,
+            timeout,
+        } => {
+            let mut req = Request::new("wait", target.into_iter().collect());
+            for (k, v) in [
+                ("text", text),
+                ("url", url),
+                ("fn", func),
+                ("load", load),
+                ("state", state),
+            ] {
+                if let Some(val) = v {
+                    req.flags.insert(k.into(), val);
+                }
+            }
+            if let Some(t) = timeout {
+                req.flags.insert("timeout".into(), t.to_string());
+            }
+            send_action(&cfg, req, json).await
         }
         Command::Get { args } => send_action(&cfg, Request::new("get", args), json).await,
         Command::Eval { js } => {
