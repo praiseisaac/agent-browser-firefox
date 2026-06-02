@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>agent-browser-firefox — Architecture &amp; Flow</title>
+<style>
+  :root {
+    --bg: #0f1116; --panel: #171a21; --ink: #e6e9ef; --muted: #9aa3b2;
+    --line: #2a2f3a; --ff: #ff7139; --ff2: #ffb259; --bidi: #4aa3ff;
+    --good: #46c98b; --warn: #ffcc4d; --bad: #ff6b6b; --accent: #b083ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    padding: 40px 24px 24px; max-width: 980px; margin: 0 auto;
+    border-bottom: 1px solid var(--line);
+  }
+  h1 { margin: 0 0 6px; font-size: 30px; letter-spacing: -0.5px; }
+  h1 .ff { color: var(--ff); }
+  .sub { color: var(--muted); font-size: 16px; }
+  main { max-width: 980px; margin: 0 auto; padding: 8px 24px 80px; }
+  section { margin: 44px 0; }
+  h2 {
+    font-size: 21px; margin: 0 0 4px; display: flex; align-items: center; gap: 10px;
+  }
+  h2 .n {
+    font-size: 13px; color: var(--bg); background: var(--ff); font-weight: 700;
+    width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center;
+  }
+  .lede { color: var(--muted); margin: 0 0 18px; }
+  .fig {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 18px; overflow-x: auto;
+  }
+  svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+  code, .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+    background: #11141b; border: 1px solid var(--line); padding: 1px 6px; border-radius: 6px;
+    color: var(--ff2);
+  }
+  table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  td code { color: var(--ff2); }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 14px 2px 0; color: var(--muted); font-size: 13px; }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .dot { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .footer { color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); padding-top: 18px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="ff">agent-browser-firefox</span> — Architecture &amp; Flow</h1>
+  <div class="sub">A Firefox-native browser automation CLI for AI agents, driving Firefox over
+  <b>WebDriver BiDi</b> — the counterpart to agent-browser's Chrome/CDP attachment.</div>
+</header>
+
+<main>
+
+<!-- ============================================================ -->
+<section>
+  <h2><span class="n">1</span> System architecture</h2>
+  <p class="lede">Each CLI command is a short-lived process. The browser session lives in a
+  long-running <b>daemon</b>, so state (the open tab, <code>@refs</code>) survives across
+  invocations. The daemon talks to Firefox over a BiDi WebSocket.</p>
+  <div class="fig">
+  <svg viewBox="0 0 900 380" role="img" aria-label="System architecture diagram">
+    <defs>
+      <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#9aa3b2"/>
+      </marker>
+      <marker id="arrowff" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#ff7139"/>
+      </marker>
+      <marker id="arrowbidi" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#4aa3ff"/>
+      </marker>
+    </defs>
+
+    <!-- CLI invocations -->
+    <rect x="20" y="40" width="200" height="300" rx="12" fill="#11141b" stroke="#2a2f3a"/>
+    <text x="120" y="66" fill="#9aa3b2" font-size="12" text-anchor="middle">CLI invocations (ephemeral)</text>
+    <g font-size="13" fill="#e6e9ef" text-anchor="middle">
+      <rect x="44" y="84"  width="152" height="34" rx="8" fill="#1c2029" stroke="#2a2f3a"/><text x="120" y="106">open example.com</text>
+      <rect x="44" y="128" width="152" height="34" rx="8" fill="#1c2029" stroke="#2a2f3a"/><text x="120" y="150">snapshot</text>
+      <rect x="44" y="172" width="152" height="34" rx="8" fill="#1c2029" stroke="#2a2f3a"/><text x="120" y="194">click @e2</text>
+      <rect x="44" y="216" width="152" height="34" rx="8" fill="#1c2029" stroke="#2a2f3a"/><text x="120" y="238">get title</text>
+      <rect x="44" y="260" width="152" height="34" rx="8" fill="#1c2029" stroke="#2a2f3a"/><text x="120" y="282">close</text>
+    </g>
+
+    <!-- Daemon -->
+    <rect x="330" y="70" width="230" height="240" rx="12" fill="#171a21" stroke="#ff7139"/>
+    <text x="445" y="96" fill="#ff7139" font-size="14" text-anchor="middle" font-weight="700">daemon (per instance)</text>
+    <g font-size="12.5" fill="#e6e9ef" text-anchor="middle">
+      <rect x="352" y="112" width="186" height="40" rx="8" fill="#1c2029" stroke="#2a2f3a"/>
+      <text x="445" y="130">Unix socket listener</text><text x="445" y="146" fill="#9aa3b2" font-size="11">abf-&lt;id&gt;.sock</text>
+      <rect x="352" y="162" width="186" height="40" rx="8" fill="#1c2029" stroke="#2a2f3a"/>
+      <text x="445" y="180">BiDi session</text><text x="445" y="196" fill="#9aa3b2" font-size="11">current context (tab)</text>
+      <rect x="352" y="212" width="186" height="40" rx="8" fill="#1c2029" stroke="#2a2f3a"/>
+      <text x="445" y="230">actions dispatch</text><text x="445" y="246" fill="#9aa3b2" font-size="11">navigate · click · eval …</text>
+    </g>
+
+    <!-- Firefox -->
+    <rect x="660" y="70" width="210" height="240" rx="12" fill="#241a14" stroke="#ff7139"/>
+    <text x="765" y="96" fill="#ffb259" font-size="14" text-anchor="middle" font-weight="700">Firefox (headless)</text>
+    <g font-size="12.5" fill="#e6e9ef" text-anchor="middle">
+      <rect x="682" y="112" width="166" height="44" rx="8" fill="#2a1f17" stroke="#3a2c20"/>
+      <text x="765" y="130">Remote agent</text><text x="765" y="147" fill="#ffb259" font-size="11">--remote-debugging-port</text>
+      <rect x="682" y="166" width="166" height="44" rx="8" fill="#2a1f17" stroke="#3a2c20"/>
+      <text x="765" y="184">Dedicated profile</text><text x="765" y="201" fill="#9aa3b2" font-size="11">--no-remote · user.js</text>
+      <rect x="682" y="220" width="166" height="44" rx="8" fill="#2a1f17" stroke="#3a2c20"/>
+      <text x="765" y="238">Page / DOM</text><text x="765" y="255" fill="#9aa3b2" font-size="11">data-abf-ref="e2"</text>
+    </g>
+
+    <!-- arrows -->
+    <line x1="222" y1="190" x2="326" y2="190" stroke="#9aa3b2" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="274" y="180" fill="#9aa3b2" font-size="11" text-anchor="middle">JSON / socket</text>
+    <line x1="562" y1="190" x2="656" y2="190" stroke="#4aa3ff" stroke-width="2" marker-end="url(#arrowbidi)"/>
+    <text x="609" y="180" fill="#4aa3ff" font-size="11" text-anchor="middle">BiDi ws://</text>
+
+    <text x="120" y="324" fill="#9aa3b2" font-size="11" text-anchor="middle">spawns daemon on demand ↑</text>
+  </svg>
+  </div>
+  <div class="legend">
+    <span><i class="dot" style="background:#ff7139"></i>Firefox / daemon boundary</span>
+    <span><i class="dot" style="background:#4aa3ff"></i>WebDriver BiDi WebSocket</span>
+    <span><i class="dot" style="background:#9aa3b2"></i>Local IPC (Unix socket)</span>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+  <h2><span class="n">2</span> Command flow &amp; the “no-restart” rule</h2>
+  <p class="lede">Every command calls <code>ensure_daemon</code>. While a daemon is alive, all
+  commands reuse the <b>same</b> Firefox — it is never restarted. A restart only happens
+  after a daemon dies, because Firefox orphans its single BiDi session.</p>
+  <div class="fig">
+  <svg viewBox="0 0 900 470" role="img" aria-label="ensure_daemon decision flowchart">
+    <defs>
+      <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#9aa3b2"/>
+      </marker>
+    </defs>
+
+    <!-- start -->
+    <rect x="360" y="20" width="180" height="40" rx="20" fill="#1c2029" stroke="#b083ff"/>
+    <text x="450" y="45" fill="#e6e9ef" font-size="13" text-anchor="middle">CLI command runs</text>
+
+    <!-- decision: record exists & daemon alive? -->
+    <polygon points="450,90 610,150 450,210 290,150" fill="#171a21" stroke="#4aa3ff"/>
+    <text x="450" y="142" fill="#e6e9ef" font-size="12.5" text-anchor="middle">Daemon alive</text>
+    <text x="450" y="160" fill="#e6e9ef" font-size="12.5" text-anchor="middle">&amp; responds to ping?</text>
+
+    <!-- yes -> reuse -->
+    <rect x="650" y="128" width="220" height="46" rx="10" fill="#15251c" stroke="#46c98b"/>
+    <text x="760" y="148" fill="#9affc4" font-size="13" text-anchor="middle" font-weight="700">REUSE live session</text>
+    <text x="760" y="165" fill="#9aa3b2" font-size="11" text-anchor="middle">same Firefox · no restart</text>
+    <line x1="610" y1="150" x2="646" y2="150" stroke="#46c98b" stroke-width="2" marker-end="url(#a2)"/>
+    <text x="628" y="140" fill="#46c98b" font-size="11" text-anchor="middle">yes</text>
+
+    <!-- no -> reap -->
+    <line x1="450" y1="210" x2="450" y2="248" stroke="#9aa3b2" stroke-width="2" marker-end="url(#a2)"/>
+    <text x="466" y="232" fill="#ff6b6b" font-size="11" text-anchor="start">no (daemon gone)</text>
+    <rect x="300" y="250" width="300" height="58" rx="10" fill="#241616" stroke="#ff6b6b"/>
+    <text x="450" y="272" fill="#ffb3b3" font-size="12.5" text-anchor="middle">Reap orphaned Firefox (if any)</text>
+    <text x="450" y="291" fill="#9aa3b2" font-size="11" text-anchor="middle">its BiDi session is stuck &amp; unusable → kill + clear record</text>
+
+    <!-- decision: allow launch? -->
+    <polygon points="450,330 600,378 450,426 300,378" fill="#171a21" stroke="#ffcc4d"/>
+    <text x="450" y="373" fill="#e6e9ef" font-size="12.5" text-anchor="middle">Command is</text>
+    <text x="450" y="391" fill="#e6e9ef" font-size="12.5" text-anchor="middle">'open'?</text>
+    <line x1="450" y1="308" x2="450" y2="328" stroke="#9aa3b2" stroke-width="2" marker-end="url(#a2)"/>
+
+    <!-- yes -> cold start -->
+    <rect x="630" y="354" width="240" height="48" rx="10" fill="#1c2029" stroke="#ff7139"/>
+    <text x="750" y="374" fill="#ffb259" font-size="13" text-anchor="middle" font-weight="700">COLD START</text>
+    <text x="750" y="391" fill="#9aa3b2" font-size="11" text-anchor="middle">launch Firefox + new session</text>
+    <line x1="600" y1="378" x2="626" y2="378" stroke="#ff7139" stroke-width="2" marker-end="url(#a2)"/>
+    <text x="615" y="368" fill="#ff7139" font-size="11" text-anchor="middle">yes</text>
+
+    <!-- no -> error -->
+    <rect x="120" y="354" width="150" height="48" rx="10" fill="#241616" stroke="#ff6b6b"/>
+    <text x="195" y="374" fill="#ffb3b3" font-size="12.5" text-anchor="middle">error: no session</text>
+    <text x="195" y="391" fill="#9aa3b2" font-size="11" text-anchor="middle">“run open first”</text>
+    <line x1="300" y1="378" x2="274" y2="378" stroke="#9aa3b2" stroke-width="2" marker-end="url(#a2)"/>
+    <text x="287" y="368" fill="#9aa3b2" font-size="11" text-anchor="middle">no</text>
+  </svg>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+  <h2><span class="n">3</span> BiDi handshake (cold start)</h2>
+  <p class="lede">Discovery is deterministic: we choose the port, so the endpoint is
+  <code>ws://127.0.0.1:&lt;port&gt;/session</code>. We poll the TCP port rather than parse
+  stderr — on macOS the Firefox launcher closes its inherited stderr after startup.</p>
+  <div class="fig">
+  <svg viewBox="0 0 900 360" role="img" aria-label="BiDi handshake sequence">
+    <defs>
+      <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#4aa3ff"/>
+      </marker>
+      <marker id="a3b" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+        <path d="M10,0 L0,5 L10,10 z" fill="#46c98b"/>
+      </marker>
+    </defs>
+    <!-- lifelines -->
+    <text x="170" y="34" fill="#ff7139" font-size="13" text-anchor="middle" font-weight="700">daemon</text>
+    <text x="730" y="34" fill="#ffb259" font-size="13" text-anchor="middle" font-weight="700">Firefox remote agent</text>
+    <line x1="170" y1="44" x2="170" y2="340" stroke="#2a2f3a" stroke-width="2"/>
+    <line x1="730" y1="44" x2="730" y2="340" stroke="#2a2f3a" stroke-width="2"/>
+
+    <g font-size="12.5">
+      <!-- launch -->
+      <line x1="172" y1="70" x2="728" y2="70" stroke="#ff7139" stroke-width="2" marker-end="url(#a3)"/>
+      <text x="450" y="62" fill="#e6e9ef" text-anchor="middle">spawn: --remote-debugging-port P --no-remote --profile …</text>
+      <!-- poll -->
+      <line x1="172" y1="112" x2="728" y2="112" stroke="#9aa3b2" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#a3)"/>
+      <text x="450" y="104" fill="#9aa3b2" text-anchor="middle">poll TCP connect 127.0.0.1:P  (until accepting)</text>
+      <!-- connect ws -->
+      <line x1="172" y1="154" x2="728" y2="154" stroke="#4aa3ff" stroke-width="2" marker-end="url(#a3)"/>
+      <text x="450" y="146" fill="#4aa3ff" text-anchor="middle">WebSocket connect  ws://127.0.0.1:P/session</text>
+      <!-- session.new -->
+      <line x1="172" y1="196" x2="728" y2="196" stroke="#4aa3ff" stroke-width="2" marker-end="url(#a3)"/>
+      <text x="450" y="188" fill="#e6e9ef" text-anchor="middle">→ session.new { capabilities:{} }</text>
+      <line x1="728" y1="222" x2="172" y2="222" stroke="#46c98b" stroke-width="2" marker-end="url(#a3b)"/>
+      <text x="450" y="214" fill="#46c98b" text-anchor="middle">← success { sessionId }</text>
+      <!-- getTree -->
+      <line x1="172" y1="264" x2="728" y2="264" stroke="#4aa3ff" stroke-width="2" marker-end="url(#a3)"/>
+      <text x="450" y="256" fill="#e6e9ef" text-anchor="middle">→ browsingContext.getTree   (bind first tab as context)</text>
+      <!-- commands -->
+      <line x1="172" y1="306" x2="728" y2="306" stroke="#4aa3ff" stroke-width="2" marker-end="url(#a3)"/>
+      <text x="450" y="298" fill="#e6e9ef" text-anchor="middle">→ navigate · script.evaluate · captureScreenshot · …</text>
+      <line x1="728" y1="332" x2="172" y2="332" stroke="#46c98b" stroke-width="2" marker-end="url(#a3b)"/>
+      <text x="450" y="324" fill="#46c98b" text-anchor="middle">← results (matched to request by id)</text>
+    </g>
+  </svg>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+  <h2><span class="n">4</span> Instance lifecycle</h2>
+  <p class="lede">Instances are addressable by <b>ID</b> (the <code>--session</code> name) and
+  persisted to a registry on disk, so they can be listed, resumed, and closed across
+  separate terminals.</p>
+  <div class="fig">
+  <svg viewBox="0 0 900 300" role="img" aria-label="Instance lifecycle state machine">
+    <defs>
+      <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#9aa3b2"/>
+      </marker>
+    </defs>
+    <!-- states -->
+    <rect x="40"  y="120" width="150" height="60" rx="12" fill="#1c2029" stroke="#9aa3b2"/>
+    <text x="115" y="148" fill="#e6e9ef" font-size="13" text-anchor="middle">No instance</text>
+    <text x="115" y="166" fill="#9aa3b2" font-size="11" text-anchor="middle">(no record)</text>
+
+    <rect x="370" y="40"  width="170" height="64" rx="12" fill="#15251c" stroke="#46c98b"/>
+    <text x="455" y="68"  fill="#9affc4" font-size="13" text-anchor="middle" font-weight="700">Running</text>
+    <text x="455" y="86"  fill="#9aa3b2" font-size="11" text-anchor="middle">daemon + Firefox alive</text>
+
+    <rect x="370" y="196" width="170" height="64" rx="12" fill="#241616" stroke="#ff6b6b"/>
+    <text x="455" y="224" fill="#ffb3b3" font-size="13" text-anchor="middle" font-weight="700">Orphaned</text>
+    <text x="455" y="242" fill="#9aa3b2" font-size="11" text-anchor="middle">daemon dead · session stuck</text>
+
+    <rect x="720" y="120" width="150" height="60" rx="12" fill="#1c2029" stroke="#9aa3b2"/>
+    <text x="795" y="148" fill="#e6e9ef" font-size="13" text-anchor="middle">No instance</text>
+    <text x="795" y="166" fill="#9aa3b2" font-size="11" text-anchor="middle">(cleaned up)</text>
+
+    <!-- transitions -->
+    <path d="M190,140 C260,90 300,80 366,72" fill="none" stroke="#ff7139" stroke-width="2" marker-end="url(#a4)"/>
+    <text x="270" y="92" fill="#ff7139" font-size="11" text-anchor="middle">open → cold start</text>
+
+    <path d="M455,104 C455,130 455,150 455,194" fill="none" stroke="#9aa3b2" stroke-width="2" marker-end="url(#a4)"/>
+    <text x="540" y="152" fill="#9aa3b2" font-size="11" text-anchor="middle">daemon crash / kill</text>
+
+    <path d="M455,40 C455,18 700,16 770,118" fill="none" stroke="#46c98b" stroke-width="2" marker-end="url(#a4)"/>
+    <text x="650" y="36" fill="#46c98b" font-size="11" text-anchor="middle">close (graceful)</text>
+
+    <path d="M540,228 C660,228 720,200 786,182" fill="none" stroke="#ff6b6b" stroke-width="2" marker-end="url(#a4)"/>
+    <text x="660" y="248" fill="#ff6b6b" font-size="11" text-anchor="middle">next cmd → reap + clear</text>
+
+    <!-- reuse self-loop -->
+    <path d="M520,52 C580,30 590,86 522,92" fill="none" stroke="#4aa3ff" stroke-width="2" marker-end="url(#a4)"/>
+    <text x="600" y="60" fill="#4aa3ff" font-size="11" text-anchor="start">any command = reuse</text>
+  </svg>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+  <h2><span class="n">5</span> Configuration precedence</h2>
+  <p class="lede">Easy setup: every setting has a sane default and can be overridden at four
+  layers. Later layers win.</p>
+  <div class="fig">
+  <svg viewBox="0 0 900 150" role="img" aria-label="Config precedence">
+    <defs>
+      <marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#b083ff"/>
+      </marker>
+    </defs>
+    <g font-size="12.5" text-anchor="middle">
+      <rect x="20"  y="50" width="180" height="56" rx="10" fill="#1c2029" stroke="#2a2f3a"/>
+      <text x="110" y="74" fill="#e6e9ef">Built-in defaults</text>
+      <text x="110" y="92" fill="#9aa3b2" font-size="11">port 9222 · headless</text>
+
+      <rect x="240" y="50" width="180" height="56" rx="10" fill="#1c2029" stroke="#2a2f3a"/>
+      <text x="330" y="74" fill="#e6e9ef">Config file</text>
+      <text x="330" y="92" fill="#9aa3b2" font-size="11">agent-browser-firefox.json</text>
+
+      <rect x="460" y="50" width="180" height="56" rx="10" fill="#1c2029" stroke="#2a2f3a"/>
+      <text x="550" y="74" fill="#e6e9ef">Environment</text>
+      <text x="550" y="92" fill="#9aa3b2" font-size="11">ABF_PORT · FIREFOX_BIN …</text>
+
+      <rect x="680" y="50" width="180" height="56" rx="10" fill="#241a14" stroke="#ff7139"/>
+      <text x="770" y="74" fill="#ffb259">CLI flags</text>
+      <text x="770" y="92" fill="#9aa3b2" font-size="11">--port · --headed …</text>
+    </g>
+    <line x1="200" y1="78" x2="238" y2="78" stroke="#b083ff" stroke-width="2" marker-end="url(#a5)"/>
+    <line x1="420" y1="78" x2="458" y2="78" stroke="#b083ff" stroke-width="2" marker-end="url(#a5)"/>
+    <line x1="640" y1="78" x2="678" y2="78" stroke="#b083ff" stroke-width="2" marker-end="url(#a5)"/>
+    <text x="450" y="132" fill="#9aa3b2" font-size="12" text-anchor="middle">lowest priority  →  highest priority</text>
+  </svg>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+  <h2><span class="n">6</span> Command reference</h2>
+  <table>
+    <tr><th>Command</th><th>What it does</th></tr>
+    <tr><td><code>open [url]</code></td><td>Launch (or reuse) the instance; navigate if a URL is given. Aliases: <code>goto</code>, <code>navigate</code>.</td></tr>
+    <tr><td><code>snapshot</code></td><td>Accessibility-style DOM tree; tags visible elements with <code>@eN</code> refs (stored as <code>data-abf-ref</code>).</td></tr>
+    <tr><td><code>click &lt;sel|@ref&gt;</code></td><td>Click an element by CSS selector or snapshot ref.</td></tr>
+    <tr><td><code>fill &lt;sel&gt; &lt;text&gt;</code></td><td>Clear and fill an input.</td></tr>
+    <tr><td><code>type &lt;sel&gt; &lt;text&gt;</code></td><td>Append text to an element.</td></tr>
+    <tr><td><code>get &lt;url|title|text|html|value|attr&gt;</code></td><td>Read page/element info.</td></tr>
+    <tr><td><code>eval &lt;js&gt;</code></td><td>Evaluate JavaScript in the page and return the value.</td></tr>
+    <tr><td><code>screenshot [path]</code></td><td>Capture a PNG (defaults to a temp path).</td></tr>
+    <tr><td><code>status</code></td><td>Current title + URL for the instance.</td></tr>
+    <tr><td><code>list</code></td><td>All instances with liveness (daemon / Firefox) and last URL. Alias: <code>ls</code>.</td></tr>
+    <tr><td><code>close [--all]</code></td><td>Close this instance (or every instance). Aliases: <code>quit</code>, <code>exit</code>.</td></tr>
+    <tr><td><code>config</code></td><td>Show resolved configuration and the config-file path.</td></tr>
+  </table>
+  <p class="lede" style="margin-top:14px">Global flags: <code>-s/--session &lt;id&gt;</code>,
+  <code>-p/--port &lt;n&gt;</code>, <code>--firefox-bin &lt;path&gt;</code>,
+  <code>--profile &lt;dir&gt;</code>, <code>--headless</code>/<code>--headed</code>, <code>--json</code>.</p>
+</section>
+
+<div class="footer">
+  Generated for <b>agent-browser-firefox</b> · drives Firefox via WebDriver BiDi ·
+  open <span class="mono">docs/flow.html</span> in a browser to view.
+</div>
+
+</main>
+</body>
+</html>

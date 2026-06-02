@@ -1,0 +1,38 @@
+# ---- Rust / Cargo ----
+/target/
+**/*.rs.bk
+*.pdb
+# NOTE: Cargo.lock is intentionally committed (this is a binary/app crate).
+
+# ---- Local runtime / user-specific ----
+# Local config file resolved by the CLI (machine-specific; keep the .example).
+agent-browser-firefox.json
+# Daemon logs, sockets, temp profiles, and screenshots default to the system
+# temp dir, but ignore them if anything lands in-tree.
+abf-*.log
+abf-*.sock
+abf-screenshot-*.png
+*.screenshot.png
+
+# ---- Environment / secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- macOS ----
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ---- Editors / IDEs ----
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.iml
+
+# ---- Misc ----
+*.log
+tmp/
