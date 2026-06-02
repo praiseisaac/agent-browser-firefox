@@ -23,6 +23,10 @@ pub async fn handle(session: &BidiSession, req: &Request) -> Response {
         "scroll" => scroll(session, req).await,
         "wait" => wait(session, req).await,
         "find" => find(session, req).await,
+        "logs" => logs(session, req),
+        "network" => network(session, req),
+        "route" => route(session, req).await,
+        "unroute" => unroute(session, req).await,
         "get" => get(session, req).await,
         "eval" => eval(session, req).await,
         "screenshot" => screenshot(session, req).await,
@@ -302,6 +306,87 @@ async fn scroll(session: &BidiSession, req: &Request) -> Response {
     let selector = req.flag("selector").map(resolve_selector);
     match session.scroll(dir, amount, selector.as_deref()).await {
         Ok(()) => Response::ok_text(format!("scrolled {dir} {amount}")),
+        Err(e) => Response::err(e),
+    }
+}
+
+// ---- network + console logs ------------------------------------------------
+
+fn logs(session: &BidiSession, req: &Request) -> Response {
+    if req.flag_bool("clear") {
+        session.clear_console();
+        return Response::ok_text("console cleared");
+    }
+    let entries = session.console_log();
+    let text = entries
+        .iter()
+        .map(|e| {
+            format!(
+                "[{}] {}",
+                e.get("level").and_then(Value::as_str).unwrap_or(""),
+                e.get("text").and_then(Value::as_str).unwrap_or("")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let display = if text.is_empty() { "(no console messages)".into() } else { text };
+    Response::ok_data(Some(display), json!({ "console": entries }))
+}
+
+fn network(session: &BidiSession, req: &Request) -> Response {
+    if req.flag_bool("clear") {
+        session.clear_network();
+        return Response::ok_text("network log cleared");
+    }
+    let entries = session.network_log();
+    let text = entries
+        .iter()
+        .map(|e| {
+            let status = match e.get("status") {
+                Some(Value::Null) | None => "…".to_string(),
+                Some(v) => v.as_i64().map(|n| n.to_string()).unwrap_or_else(|| v.as_str().unwrap_or("?").to_string()),
+            };
+            format!(
+                "{:<6} {:>4} {}",
+                e.get("method").and_then(Value::as_str).unwrap_or(""),
+                status,
+                e.get("url").and_then(Value::as_str).unwrap_or("")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let blocks = session.blocks();
+    let mut display = if text.is_empty() { "(no requests captured)".into() } else { text };
+    if !blocks.is_empty() {
+        display = format!("blocking: {}\n{display}", blocks.join(", "));
+    }
+    Response::ok_data(Some(display), json!({ "network": entries, "blocking": blocks }))
+}
+
+async fn route(session: &BidiSession, req: &Request) -> Response {
+    let Some(pattern) = req.args.first() else {
+        return Response::err("usage: route <url-pattern> <block|off>");
+    };
+    match req.args.get(1).map(String::as_str).unwrap_or("block") {
+        "block" => match session.add_block(pattern).await {
+            Ok(()) => Response::ok_text(format!("blocking requests matching '{pattern}'")),
+            Err(e) => Response::err(e),
+        },
+        "off" | "unblock" => unblock(session, pattern).await,
+        other => Response::err(format!("unknown route mode '{other}' (block/off)")),
+    }
+}
+
+async fn unroute(session: &BidiSession, req: &Request) -> Response {
+    let Some(pattern) = req.args.first() else {
+        return Response::err("usage: unroute <url-pattern>");
+    };
+    unblock(session, pattern).await
+}
+
+async fn unblock(session: &BidiSession, pattern: &str) -> Response {
+    match session.remove_block(pattern).await {
+        Ok(()) => Response::ok_text(format!("no longer blocking '{pattern}'")),
         Err(e) => Response::err(e),
     }
 }

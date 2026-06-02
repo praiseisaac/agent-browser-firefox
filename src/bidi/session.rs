@@ -18,7 +18,25 @@ pub struct BidiSession {
     /// Last-known top-level browsing context (tab). Always re-resolved before an
     /// action; cached only for display and as a hint.
     context: Mutex<String>,
+    /// Background-collected console logs + network activity, and active blocks.
+    telemetry: Arc<Mutex<Telemetry>>,
 }
+
+/// Buffers populated by a background task from the BiDi event stream.
+#[derive(Default)]
+pub struct Telemetry {
+    /// Console messages and page errors: `{ level, text }`.
+    pub console: Vec<Value>,
+    /// Network requests: `{ id, method, url, status }`.
+    pub network: Vec<Value>,
+    /// URL patterns to block (substring or `*`/`?` glob).
+    pub blocks: Vec<String>,
+    /// The single broad intercept id, present while any block is active.
+    pub intercept_id: Option<String>,
+}
+
+const MAX_CONSOLE: usize = 500;
+const MAX_NETWORK: usize = 400;
 
 impl BidiSession {
     /// Open a BiDi session and bind to the current top-level browsing context.
@@ -40,20 +58,109 @@ impl BidiSession {
             Err(e) => return Err(e),
         };
 
-        // Subscribe to navigation/load events so navigate() can wait reliably.
+        // Subscribe to load, console, and network events. Load events let
+        // navigate() wait reliably; the rest feed the telemetry buffers.
         let _ = client
             .send(
                 "session.subscribe",
-                json!({ "events": ["browsingContext.load", "browsingContext.domContentLoaded"] }),
+                json!({ "events": [
+                    "browsingContext.load",
+                    "browsingContext.domContentLoaded",
+                    "log.entryAdded",
+                    "network.beforeRequestSent",
+                    "network.responseCompleted",
+                    "network.fetchError"
+                ] }),
             )
             .await;
+
+        let telemetry = Arc::new(Mutex::new(Telemetry::default()));
+        tokio::spawn(telemetry_loop(Arc::clone(&client), Arc::clone(&telemetry)));
 
         let context = Self::resolve_top_context(&client).await?;
         Ok(Self {
             client,
             session_id,
             context: Mutex::new(context),
+            telemetry,
         })
+    }
+
+    // ---- telemetry: console logs, network log, request blocking -----------
+
+    /// Snapshot the console/error log.
+    pub fn console_log(&self) -> Vec<Value> {
+        self.telemetry.lock().map(|t| t.console.clone()).unwrap_or_default()
+    }
+
+    /// Snapshot the network request log.
+    pub fn network_log(&self) -> Vec<Value> {
+        self.telemetry.lock().map(|t| t.network.clone()).unwrap_or_default()
+    }
+
+    /// Active block patterns.
+    pub fn blocks(&self) -> Vec<String> {
+        self.telemetry.lock().map(|t| t.blocks.clone()).unwrap_or_default()
+    }
+
+    pub fn clear_console(&self) {
+        if let Ok(mut t) = self.telemetry.lock() {
+            t.console.clear();
+        }
+    }
+
+    pub fn clear_network(&self) {
+        if let Ok(mut t) = self.telemetry.lock() {
+            t.network.clear();
+        }
+    }
+
+    /// Block requests whose URL matches `pattern`. Registers a broad
+    /// `beforeRequestSent` intercept on the first block.
+    pub async fn add_block(&self, pattern: &str) -> Result<(), String> {
+        let need_intercept = {
+            let mut t = self.telemetry.lock().map_err(|_| "telemetry poisoned")?;
+            if !t.blocks.iter().any(|b| b == pattern) {
+                t.blocks.push(pattern.to_string());
+            }
+            t.intercept_id.is_none()
+        };
+        if need_intercept {
+            // An empty `pattern` URL pattern matches every request; we then
+            // decide block vs continue per-request in the telemetry loop.
+            let res = self
+                .client
+                .send(
+                    "network.addIntercept",
+                    json!({ "phases": ["beforeRequestSent"], "urlPatterns": [{ "type": "pattern" }] }),
+                )
+                .await?;
+            if let Some(id) = res.get("intercept").and_then(Value::as_str) {
+                if let Ok(mut t) = self.telemetry.lock() {
+                    t.intercept_id = Some(id.to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Stop blocking `pattern`. Removes the intercept when no blocks remain.
+    pub async fn remove_block(&self, pattern: &str) -> Result<(), String> {
+        let drop_intercept = {
+            let mut t = self.telemetry.lock().map_err(|_| "telemetry poisoned")?;
+            t.blocks.retain(|b| b != pattern);
+            t.blocks.is_empty()
+        };
+        if drop_intercept {
+            let id = self.telemetry.lock().ok().and_then(|mut t| t.intercept_id.take());
+            if let Some(id) = id {
+                let _ = self
+                    .client
+                    .send("network.removeIntercept", json!({ "intercept": id }))
+                    .await;
+            }
+        }
+        Ok(())
     }
 
     /// Find the current top-level browsing context, creating a tab if the window
@@ -376,6 +483,100 @@ impl BidiSession {
         let _ = self.client.send("session.end", json!({})).await;
         Ok(())
     }
+}
+
+/// Background task: drain the BiDi event stream into the telemetry buffers and
+/// resolve intercepted requests (block matches, continue the rest).
+async fn telemetry_loop(client: Arc<BidiClient>, tel: Arc<Mutex<Telemetry>>) {
+    let mut rx = client.subscribe();
+    loop {
+        let ev = match rx.recv().await {
+            Ok(ev) => ev,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(_) => break, // channel closed
+        };
+        let method = ev.get("method").and_then(Value::as_str).unwrap_or("");
+        let p = ev.get("params").cloned().unwrap_or(Value::Null);
+
+        match method {
+            "log.entryAdded" => {
+                let level = p.get("level").and_then(Value::as_str).unwrap_or("info");
+                let text = p.get("text").and_then(Value::as_str).unwrap_or("");
+                if let Ok(mut t) = tel.lock() {
+                    t.console.push(json!({ "level": level, "text": text }));
+                    let overflow = t.console.len().saturating_sub(MAX_CONSOLE);
+                    if overflow > 0 {
+                        t.console.drain(0..overflow);
+                    }
+                }
+            }
+            "network.beforeRequestSent" => {
+                let req = p.get("request").cloned().unwrap_or(Value::Null);
+                let id = req.get("request").and_then(Value::as_str).unwrap_or("");
+                let url = req.get("url").and_then(Value::as_str).unwrap_or("");
+                let http = req.get("method").and_then(Value::as_str).unwrap_or("");
+                if let Ok(mut t) = tel.lock() {
+                    t.network.push(json!({ "id": id, "method": http, "url": url, "status": Value::Null }));
+                    let overflow = t.network.len().saturating_sub(MAX_NETWORK);
+                    if overflow > 0 {
+                        t.network.drain(0..overflow);
+                    }
+                }
+                // If this request was intercepted, decide block vs continue.
+                // Resolve it on a detached task so the event loop never backs up
+                // (a slow loop lets Firefox discard still-paused requests).
+                let blocked = p.get("isBlocked").and_then(Value::as_bool).unwrap_or(false);
+                if blocked {
+                    let should_block = tel
+                        .lock()
+                        .map(|t| t.blocks.iter().any(|b| url_matches(b, url)))
+                        .unwrap_or(false);
+                    let cmd = if should_block { "network.failRequest" } else { "network.continueRequest" };
+                    let client = Arc::clone(&client);
+                    let id = id.to_string();
+                    tokio::spawn(async move {
+                        let _ = client.send(cmd, json!({ "request": id })).await;
+                    });
+                }
+            }
+            "network.responseCompleted" => {
+                let req = p.get("request").cloned().unwrap_or(Value::Null);
+                let id = req.get("request").and_then(Value::as_str).unwrap_or("");
+                let status = p.get("response").and_then(|r| r.get("status")).cloned();
+                if let (Ok(mut t), Some(status)) = (tel.lock(), status) {
+                    if let Some(entry) = t.network.iter_mut().rev().find(|e| e.get("id").and_then(Value::as_str) == Some(id)) {
+                        entry["status"] = status;
+                    }
+                }
+            }
+            "network.fetchError" => {
+                let req = p.get("request").cloned().unwrap_or(Value::Null);
+                let id = req.get("request").and_then(Value::as_str).unwrap_or("");
+                if let Ok(mut t) = tel.lock() {
+                    if let Some(entry) = t.network.iter_mut().rev().find(|e| e.get("id").and_then(Value::as_str) == Some(id)) {
+                        entry["status"] = json!("error");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Substring match, or `*`/`?` glob when the pattern contains wildcards.
+fn url_matches(pattern: &str, url: &str) -> bool {
+    fn m(p: &[u8], t: &[u8]) -> bool {
+        match p.first() {
+            None => t.is_empty(),
+            Some(b'*') => m(&p[1..], t) || (!t.is_empty() && m(p, &t[1..])),
+            Some(b'?') => !t.is_empty() && m(&p[1..], &t[1..]),
+            Some(&c) => !t.is_empty() && t[0] == c && m(&p[1..], &t[1..]),
+        }
+    }
+    if !pattern.contains('*') && !pattern.contains('?') {
+        return url.contains(pattern);
+    }
+    m(pattern.as_bytes(), url.as_bytes())
 }
 
 /// Map a key name to its WebDriver key value (the `\uE0xx` codepoints for

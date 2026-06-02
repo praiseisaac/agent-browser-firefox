@@ -139,6 +139,24 @@ enum Command {
     },
     /// Accessibility-style DOM snapshot with @refs.
     Snapshot,
+    /// Show captured console messages and page errors (`--clear` to reset).
+    Logs {
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Show captured network requests (`--clear` to reset).
+    Network {
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Block requests matching a URL pattern: route <pattern> [block|off].
+    Route {
+        pattern: String,
+        #[arg(default_value = "block")]
+        mode: String,
+    },
+    /// Stop blocking a URL pattern.
+    Unroute { pattern: String },
     /// Show the current page status for this instance.
     Status,
     /// Close the browser. `--all` closes every instance.
@@ -270,6 +288,26 @@ async fn main() {
         }
         Command::Screenshot { path, full } => cmd_screenshot(&cfg, path, full, json).await,
         Command::Snapshot => send_action(&cfg, Request::new("snapshot", vec![]), json).await,
+        Command::Logs { clear } => {
+            let mut req = Request::new("logs", vec![]);
+            if clear {
+                req.flags.insert("clear".into(), "true".into());
+            }
+            send_action(&cfg, req, json).await
+        }
+        Command::Network { clear } => {
+            let mut req = Request::new("network", vec![]);
+            if clear {
+                req.flags.insert("clear".into(), "true".into());
+            }
+            send_action(&cfg, req, json).await
+        }
+        Command::Route { pattern, mode } => {
+            send_action(&cfg, Request::new("route", vec![pattern, mode]), json).await
+        }
+        Command::Unroute { pattern } => {
+            send_action(&cfg, Request::new("unroute", vec![pattern]), json).await
+        }
         Command::Status => cmd_status(&cfg, json).await,
         Command::Close { all } => cmd_close(&cfg, all, json).await,
         Command::List => cmd_list(json),

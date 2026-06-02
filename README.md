@@ -138,6 +138,10 @@ See **[docs/flow.html](docs/flow.html)** for illustrated architecture and flow d
 | `find <role\|text\|label\|placeholder\|alt\|title\|testid\|first\|last\|nth> <value> <action> [value]` | Locate by meaning + act (`--name`, `--exact`) |
 | `get <url\|title\|text\|html\|value\|attr> [sel]` | Read page/element info |
 | `eval <js>` | Evaluate JavaScript, returns the value |
+| `logs [--clear]` | Captured console messages and page errors |
+| `network [--clear]` | Captured network requests (method, status, URL) |
+| `route <pattern> [block\|off]` | Block requests matching a URL pattern (substring or `*`/`?` glob) |
+| `unroute <pattern>` | Stop blocking a pattern |
 | `screenshot [path]` | Capture PNG (defaults to a temp path) |
 | `status` | Current title + URL for the instance |
 | `list` | List all instances + liveness (alias: `ls`) |
