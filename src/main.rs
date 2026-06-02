@@ -7,6 +7,7 @@
 
 mod actions;
 mod bidi;
+mod chat;
 mod config;
 mod daemon;
 mod firefox;
@@ -168,6 +169,8 @@ enum Command {
     /// List all known instances and their liveness.
     #[command(visible_alias = "ls")]
     List,
+    /// Natural-language browser control (Claude). `chat "<goal>"` or REPL.
+    Chat { instruction: Option<String> },
     /// Show resolved configuration and config-file path.
     Config,
     /// Ensure Firefox is installed (sets up the browser dependency).
@@ -311,6 +314,7 @@ async fn main() {
         Command::Status => cmd_status(&cfg, json).await,
         Command::Close { all } => cmd_close(&cfg, all, json).await,
         Command::List => cmd_list(json),
+        Command::Chat { instruction } => chat::run(&cfg, instruction).await,
         Command::Config => cmd_config(&cfg, json),
         Command::Install { with_deps } => install::run(with_deps),
     };

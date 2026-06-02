@@ -146,6 +146,7 @@ See **[docs/flow.html](docs/flow.html)** for illustrated architecture and flow d
 | `status` | Current title + URL for the instance |
 | `list` | List all instances + liveness (alias: `ls`) |
 | `close [--all]` | Close this instance (or every instance) (aliases: `quit`, `exit`) |
+| `chat ["<goal>"]` | Natural-language control via Claude (REPL if no goal) |
 | `config` | Show resolved configuration |
 | `install [--with-deps]` | Ensure Firefox is installed |
 
@@ -177,6 +178,19 @@ agent-browser-firefox -s research click @e5  # routed to the research daemon onl
 agent-browser-firefox list                   # show all instances
 agent-browser-firefox close --all            # close every instance
 ```
+
+### AI chat (natural language)
+
+Drive the browser with plain English. `chat` loops the Claude API with tool use:
+snapshot the page → Claude picks actions → execute → repeat.
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+agent-browser-firefox chat "go to Hacker News and tell me the top 3 story titles"
+agent-browser-firefox chat                 # interactive REPL (context carries over)
+```
+
+Model defaults to `claude-sonnet-4-6`; override with `$ABF_MODEL`.
 
 ### Structured output for scripts/agents
 
