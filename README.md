@@ -124,9 +124,18 @@ See **[docs/flow.html](docs/flow.html)** for illustrated architecture and flow d
 |---------|-------------|
 | `open [url]` | Launch/reuse instance; navigate if URL given (aliases: `goto`, `navigate`) |
 | `snapshot` | Accessibility-style DOM tree with `@eN` refs |
-| `click <sel\|@ref>` | Click element |
+| `click <sel\|@ref>` | Click element (focuses it first) |
 | `fill <sel> <text>` | Clear and fill input |
 | `type <sel> <text>` | Append text to element |
+| `press <key>` | Press a key chord at focus (`Enter`, `Tab`, `Control+a`) (alias: `key`) |
+| `keydown <key>` / `keyup <key>` | Hold / release a key |
+| `keyboard <type\|inserttext> <text>` | Real keystrokes / insert text at focus |
+| `hover <sel>` | Move the mouse over an element |
+| `dblclick <sel>` | Double-click an element |
+| `drag <src> <tgt>` | Drag one element onto another |
+| `scroll <up\|down\|left\|right> [px]` | Scroll page (`--selector` to scroll over an element) |
+| `wait <ms\|sel>` | Wait: `--text`, `--url <glob>`, `--fn <js>`, `--load`, `--state hidden`, `--timeout` |
+| `find <role\|text\|label\|placeholder\|alt\|title\|testid\|first\|last\|nth> <value> <action> [value]` | Locate by meaning + act (`--name`, `--exact`) |
 | `get <url\|title\|text\|html\|value\|attr> [sel]` | Read page/element info |
 | `eval <js>` | Evaluate JavaScript, returns the value |
 | `screenshot [path]` | Capture PNG (defaults to a temp path) |

@@ -109,6 +109,18 @@ enum Command {
         #[arg(long)]
         timeout: Option<u64>,
     },
+    /// Find an element by meaning and act on it:
+    /// find <role|text|label|placeholder|alt|title|testid|first|last|nth> <value> <action> [value].
+    Find {
+        #[arg(num_args = 1..)]
+        args: Vec<String>,
+        /// Filter a role match by accessible name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Require an exact (not substring) match.
+        #[arg(long)]
+        exact: bool,
+    },
     /// Read info: get <url|title|text|html|value|attr> [selector] [attr].
     Get {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -239,6 +251,16 @@ async fn main() {
             }
             if let Some(t) = timeout {
                 req.flags.insert("timeout".into(), t.to_string());
+            }
+            send_action(&cfg, req, json).await
+        }
+        Command::Find { args, name, exact } => {
+            let mut req = Request::new("find", args);
+            if let Some(n) = name {
+                req.flags.insert("name".into(), n);
+            }
+            if exact {
+                req.flags.insert("exact".into(), "true".into());
             }
             send_action(&cfg, req, json).await
         }

@@ -22,6 +22,7 @@ pub async fn handle(session: &BidiSession, req: &Request) -> Response {
         "drag" => drag(session, req).await,
         "scroll" => scroll(session, req).await,
         "wait" => wait(session, req).await,
+        "find" => find(session, req).await,
         "get" => get(session, req).await,
         "eval" => eval(session, req).await,
         "screenshot" => screenshot(session, req).await,
@@ -303,6 +304,177 @@ async fn scroll(session: &BidiSession, req: &Request) -> Response {
         Ok(()) => Response::ok_text(format!("scrolled {dir} {amount}")),
         Err(e) => Response::err(e),
     }
+}
+
+// ---- semantic locators -----------------------------------------------------
+
+/// `find <kind> <value> <action> [value2]` — locate an element by meaning
+/// (role/text/label/placeholder/alt/title/testid, or first/last/nth of a CSS
+/// selector), tag it, then run an action on it.
+async fn find(session: &BidiSession, req: &Request) -> Response {
+    let kind = req.args.first().map(String::as_str).unwrap_or("");
+    if kind.is_empty() {
+        return Response::err(
+            "usage: find <role|text|label|placeholder|alt|title|testid|first|last|nth> <value> <action> [value]",
+        );
+    }
+
+    // Normalize into (resolver-type, value, index-literal, action, action-value).
+    let (rtype, value, index, action, aval): (&str, String, String, String, Option<String>) =
+        match kind {
+            "first" | "last" => (
+                "css",
+                req.args.get(1).cloned().unwrap_or_default(),
+                format!("'{kind}'"),
+                req.args.get(2).cloned().unwrap_or_default(),
+                req.args.get(3).cloned(),
+            ),
+            "nth" => (
+                "css",
+                req.args.get(2).cloned().unwrap_or_default(),
+                req.args.get(1).cloned().unwrap_or_else(|| "0".into()),
+                req.args.get(3).cloned().unwrap_or_default(),
+                req.args.get(4).cloned(),
+            ),
+            _ => (
+                kind,
+                req.args.get(1).cloned().unwrap_or_default(),
+                "null".to_string(),
+                req.args.get(2).cloned().unwrap_or_default(),
+                req.args.get(3).cloned(),
+            ),
+        };
+
+    let exact = req.flag_bool("exact");
+    let name = req.flag("name");
+    let resolver = build_find_js(rtype, &value, exact, name, &index);
+
+    match session.evaluate(&resolver).await {
+        Ok(v) => {
+            let count = v.as_i64().unwrap_or(0);
+            if count == 0 {
+                return Response::err(format!("find {kind} \"{value}\": no element matched"));
+            }
+        }
+        Err(e) => return Response::err(e),
+    }
+
+    // The matched element is tagged with data-abf-find="1".
+    const SEL: &str = "[data-abf-find=\"1\"]";
+    match action.as_str() {
+        "click" => wrap(session.click(SEL).await, format!("clicked {kind} \"{value}\"")),
+        "hover" => wrap(session.hover(SEL).await, format!("hovered {kind} \"{value}\"")),
+        "fill" => match aval {
+            Some(val) => wrap(session.fill(SEL, &val).await, format!("filled {kind} \"{value}\"")),
+            None => Response::err("find … fill needs a value"),
+        },
+        "type" => match aval {
+            Some(val) => {
+                let _ = session.click(SEL).await; // focus
+                wrap(session.type_keys(&val).await, format!("typed into {kind} \"{value}\""))
+            }
+            None => Response::err("find … type needs a value"),
+        },
+        "focus" => {
+            let r = session
+                .evaluate("document.querySelector('[data-abf-find=\"1\"]').focus()")
+                .await
+                .map(|_| ());
+            wrap(r, format!("focused {kind} \"{value}\""))
+        }
+        "check" | "uncheck" => {
+            let on = action == "check";
+            let expr = format!(
+                "(() => {{ const el=document.querySelector('[data-abf-find=\"1\"]'); if(!el) return false; if(el.checked!=={on}) {{ el.click(); }} return true; }})()"
+            );
+            wrap(session.evaluate(&expr).await.map(|_| ()), format!("{action}ed {kind} \"{value}\""))
+        }
+        "text" => match session
+            .evaluate("document.querySelector('[data-abf-find=\"1\"]').innerText")
+            .await
+        {
+            Ok(v) => {
+                let t = v.as_str().unwrap_or("").to_string();
+                Response::ok_data(Some(t.clone()), json!({ "text": t }))
+            }
+            Err(e) => Response::err(e),
+        },
+        other => Response::err(format!(
+            "unknown find action '{other}' (click/fill/type/hover/focus/check/uncheck/text)"
+        )),
+    }
+}
+
+fn wrap(r: Result<(), String>, ok: String) -> Response {
+    match r {
+        Ok(()) => Response::ok_text(ok),
+        Err(e) => Response::err(e),
+    }
+}
+
+/// Build the in-page resolver: tags the matched element with `data-abf-find="1"`
+/// and returns the candidate count.
+fn build_find_js(rtype: &str, value: &str, exact: bool, name: Option<&str>, index: &str) -> String {
+    let name_lit = match name {
+        Some(n) => js_str(n),
+        None => "null".to_string(),
+    };
+    format!(
+        r##"(() => {{
+  const TYPE = {ty}, VALUE = {val}, EXACT = {exact}, NAME = {name}, INDEX = {index};
+  document.querySelectorAll('[data-abf-find]').forEach(e => e.removeAttribute('data-abf-find'));
+  const norm = s => (s || '').replace(/\s+/g, ' ').trim();
+  const eqOrIn = (txt, v) => {{ txt = norm(txt).toLowerCase(); v = norm(v).toLowerCase(); return EXACT ? txt === v : txt.includes(v); }};
+  const accName = el => norm(el.getAttribute('aria-label') || (el.labels && el.labels[0] && el.labels[0].innerText) || el.innerText || el.value || el.placeholder || el.alt || el.title || '');
+  const roleSel = {{
+    button: 'button,[role=button],input[type=submit],input[type=button],input[type=reset]',
+    link: 'a[href],[role=link]',
+    textbox: 'input:not([type=hidden]):not([type=checkbox]):not([type=radio]),textarea,[role=textbox],[contenteditable=""],[contenteditable=true]',
+    checkbox: 'input[type=checkbox],[role=checkbox]',
+    radio: 'input[type=radio],[role=radio]',
+    heading: 'h1,h2,h3,h4,h5,h6,[role=heading]',
+    img: 'img,[role=img]',
+    list: 'ul,ol,[role=list]', listitem: 'li,[role=listitem]',
+    combobox: 'select,[role=combobox]', tab: '[role=tab]', dialog: '[role=dialog]',
+  }};
+  let c = [];
+  if (TYPE === 'role') {{
+    c = [...document.querySelectorAll(roleSel[VALUE] || ('[role="' + VALUE + '"]'))];
+    if (NAME) c = c.filter(el => eqOrIn(accName(el), NAME));
+  }} else if (TYPE === 'text') {{
+    c = [...document.querySelectorAll('body *')].filter(el => el.children.length === 0 && eqOrIn(el.innerText, VALUE));
+    if (!c.length) c = [...document.querySelectorAll('body *')].filter(el => eqOrIn(el.innerText, VALUE));
+    c.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+  }} else if (TYPE === 'label') {{
+    const ls = [...document.querySelectorAll('label')].filter(l => eqOrIn(l.innerText, VALUE));
+    c = ls.map(l => l.htmlFor ? document.getElementById(l.htmlFor) : l.querySelector('input,textarea,select')).filter(Boolean);
+  }} else if (TYPE === 'placeholder') {{
+    c = [...document.querySelectorAll('[placeholder]')].filter(el => eqOrIn(el.getAttribute('placeholder'), VALUE));
+  }} else if (TYPE === 'alt') {{
+    c = [...document.querySelectorAll('[alt]')].filter(el => eqOrIn(el.getAttribute('alt'), VALUE));
+  }} else if (TYPE === 'title') {{
+    c = [...document.querySelectorAll('[title]')].filter(el => eqOrIn(el.getAttribute('title'), VALUE));
+  }} else if (TYPE === 'testid') {{
+    c = [...document.querySelectorAll('[data-testid]')].filter(el => eqOrIn(el.getAttribute('data-testid'), VALUE));
+  }} else if (TYPE === 'css') {{
+    try {{ c = [...document.querySelectorAll(VALUE)]; }} catch (e) {{ c = []; }}
+  }}
+  if (!c.length) return 0;
+  let el;
+  if (INDEX === 'first') el = c[0];
+  else if (INDEX === 'last') el = c[c.length - 1];
+  else if (typeof INDEX === 'number') el = c[INDEX];
+  else el = c[0];
+  if (!el) return 0;
+  el.setAttribute('data-abf-find', '1');
+  return c.length;
+}})()"##,
+        ty = js_str(rtype),
+        val = js_str(value),
+        exact = exact,
+        name = name_lit,
+        index = index,
+    )
 }
 
 // ---- waiting ---------------------------------------------------------------
