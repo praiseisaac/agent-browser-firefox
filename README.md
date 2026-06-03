@@ -181,8 +181,8 @@ agent-browser-firefox close --all            # close every instance
 
 ### AI chat (natural language)
 
-Drive the browser with plain English. `chat` loops the Claude API with tool use:
-snapshot the page → Claude picks actions → execute → repeat.
+Drive the browser with plain English. `chat` loops an LLM with tool use:
+snapshot the page → the model picks actions → execute → repeat.
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -190,7 +190,24 @@ agent-browser-firefox chat "go to Hacker News and tell me the top 3 story titles
 agent-browser-firefox chat                 # interactive REPL (context carries over)
 ```
 
-Model defaults to `claude-sonnet-4-6`; override with `$ABF_MODEL`.
+**Works with multiple providers** — Anthropic, OpenAI, and Gemini:
+
+```bash
+agent-browser-firefox chat "…" --provider openai   --model gpt-4o
+agent-browser-firefox chat "…" --provider gemini   --model gemini-2.0-flash
+agent-browser-firefox chat "…" --provider anthropic                  # default
+```
+
+The provider is auto-detected from whichever key is set
+(`ANTHROPIC_API_KEY` → `OPENAI_API_KEY` → `GEMINI_API_KEY`/`GOOGLE_API_KEY`),
+or forced with `--provider` / `$ABF_PROVIDER`. Model via `--model` / `$ABF_MODEL`.
+For OpenAI-compatible gateways (OpenRouter, local servers), set `$ABF_OPENAI_BASE`.
+
+| Provider | Key | Default model |
+|----------|-----|---------------|
+| `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` |
+| `openai` | `OPENAI_API_KEY` | `gpt-4o` |
+| `gemini` | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | `gemini-2.0-flash` |
 
 ### Structured output for scripts/agents
 
